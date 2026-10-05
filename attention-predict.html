@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Predicted Attention — анализ карточки товара</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0b0f0d; --bg-panel: #10201aee; --bg-panel-solid: #101715;
+    --line: #24352c; --line-soft: #1a2620;
+    --ink: #eaf2ec; --ink-dim: #8fa79b; --ink-faint: #5a6e64;
+    --amber: #ffab33; --teal: #4fd1c5; --red: #e8654a; --green: #63d08a;
+    --font-ui: 'Space Grotesk', system-ui, sans-serif;
+    --font-mono: 'IBM Plex Mono', 'SFMono-Regular', Consolas, monospace;
+  }
+  :root:not([data-theme="light"]) { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--font-ui); min-height: 100%; }
+  body { padding: 28px 20px 60px; }
+  .wrap { max-width: 920px; margin: 0 auto; }
+
+  .brand { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+  .brand-mark { color: var(--amber); font-size: 18px; }
+  .brand-title { font-weight: 600; font-size: 15px; }
+  .brand-sub { color: var(--ink-faint); font-size: 11px; font-family: var(--font-mono); }
+  h1 { font-size: 22px; font-weight: 600; margin: 18px 0 6px; letter-spacing: -0.01em; }
+  .lede { color: var(--ink-dim); font-size: 13.5px; line-height: 1.6; max-width: 640px; margin: 0 0 26px; }
+
+  .dropzone {
+    border: 1.5px dashed var(--line); border-radius: 8px;
+    padding: 40px 20px; text-align: center; cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .dropzone:hover, .dropzone.drag { border-color: var(--amber); background: #ffab3308; }
+  .dropzone .icon { font-size: 26px; color: var(--ink-faint); margin-bottom: 10px; }
+  .dropzone .main { font-size: 13.5px; color: var(--ink); margin-bottom: 4px; }
+  .dropzone .sub { font-size: 11.5px; color: var(--ink-faint); font-family: var(--font-mono); }
+  #fileInput { display: none; }
+
+  .workspace { display: none; }
+  .workspace.show { display: block; }
+
+  .stage-panel {
+    position: relative; border-radius: 8px; overflow: hidden;
+    border: 1px solid var(--line); background: #05100c; margin-top: 18px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .stage-panel img { display: block; max-width: 100%; height: auto; }
+  #heatCanvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+
+  .toolbar {
+    display: flex; align-items: center; gap: 16px; margin-top: 14px; flex-wrap: wrap;
+  }
+  .opacity-row { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 11px; color: var(--ink-dim); }
+  .opacity-row input[type=range] { width: 120px; accent-color: var(--amber); }
+
+  button {
+    font-family: var(--font-ui); font-size: 12.5px; font-weight: 500;
+    padding: 8px 15px; border-radius: 3px; border: 1px solid var(--line);
+    background: transparent; color: var(--ink); cursor: pointer;
+    transition: border-color .15s, background .15s, color .15s;
+  }
+  button:hover:not(:disabled) { border-color: var(--amber); color: var(--amber); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.primary { background: var(--amber); border-color: var(--amber); color: #1a1400; margin-left: auto; }
+  button.primary:hover:not(:disabled) { background: #ffbb55; color: #1a1400; }
+  button.ghost { border-color: transparent; color: var(--ink-dim); }
+
+  .legend-strip {
+    display: flex; align-items: center; gap: 8px; margin-top: 10px;
+    font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-faint);
+  }
+  .legend-grad { flex: 1; max-width: 220px; height: 8px; border-radius: 4px;
+    background: linear-gradient(90deg,#0a3ea8,#1fb6c9,#7be05a,#ffd23f,#ff4d3d); }
+
+  .ai-section { margin-top: 30px; }
+  .ai-status { font-family: var(--font-mono); font-size: 12px; color: var(--ink-dim); margin-top: 10px; display: none; }
+  .ai-status.show { display: block; }
+  .ai-status .dot { display:inline-block; width:6px; height:6px; border-radius:50%; background: var(--amber); margin-right: 7px; animation: pulse 1.2s ease-in-out infinite; }
+  @media (prefers-reduced-motion: no-preference) { @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} } }
+
+  .summary-box {
+    display: none; margin-top: 18px; padding: 14px 16px; border-radius: 6px;
+    border: 1px solid var(--line-soft); background: var(--bg-panel-solid);
+    font-size: 13.5px; line-height: 1.6; color: var(--ink);
+  }
+  .summary-box.show { display: block; }
+
+  .issues { display: none; flex-direction: column; gap: 10px; margin-top: 14px; }
+  .issues.show { display: flex; }
+  .issue {
+    display: flex; gap: 12px; padding: 13px 15px; border-radius: 6px;
+    background: var(--bg-panel-solid); border: 1px solid var(--line-soft);
+    border-left: 3px solid var(--ink-faint);
+  }
+  .issue.high { border-left-color: var(--red); }
+  .issue.medium { border-left-color: var(--amber); }
+  .issue.low { border-left-color: var(--teal); }
+  .issue .sev {
+    font-family: var(--font-mono); font-size: 9.5px; text-transform: uppercase;
+    letter-spacing: 0.04em; color: var(--ink-faint); white-space: nowrap; padding-top: 2px;
+  }
+  .issue.high .sev { color: var(--red); }
+  .issue.medium .sev { color: var(--amber); }
+  .issue.low .sev { color: var(--teal); }
+  .issue-body h4 { margin: 0 0 3px; font-size: 13.5px; font-weight: 600; }
+  .issue-body .zone { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-faint); margin-bottom: 6px; }
+  .issue-body p { margin: 0; font-size: 12.5px; color: var(--ink-dim); line-height: 1.55; }
+
+  .error-box {
+    display: none; margin-top: 14px; padding: 11px 15px; border-radius: 5px;
+    border: 1px solid var(--red); background: #2a120c; color: #ffb4a3; font-size: 12.5px; line-height: 1.5;
+  }
+  .error-box.show { display: block; }
+
+  .hint { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-faint); margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand"><span class="brand-mark">◎</span><span class="brand-title">Gaze Lab</span><span class="brand-sub">predicted attention · карточка товара</span></div>
+  <h1>Куда упадёт взгляд на карточке — до всякого custdev</h1>
+  <p class="lede">Загрузите карточку товара — посчитаем карту предиктивного внимания (контраст, цвет, центр кадра) и попросим Claude разобрать её по зонам с конкретными рекомендациями.</p>
+
+  <div class="dropzone" id="dropzone">
+    <div class="icon">⬒</div>
+    <div class="main">Перетащите картинку сюда или нажмите, чтобы выбрать файл</div>
+    <div class="sub">JPG / PNG / WEBP</div>
+    <input type="file" id="fileInput" accept="image/*">
+  </div>
+
+  <div class="workspace" id="workspace">
+    <div class="stage-panel" id="stagePanel">
+      <img id="cardImg" alt="Карточка товара">
+      <canvas id="heatCanvas"></canvas>
+    </div>
+
+    <div class="legend-strip"><span>низкое внимание</span><div class="legend-grad"></div><span>высокое внимание</span></div>
+
+    <div class="toolbar">
+      <div class="opacity-row">
+        <span>прозрачность heatmap</span>
+        <input type="range" id="opacitySlider" min="0" max="100" value="65">
+      </div>
+      <button class="ghost" id="btnNewImage">Загрузить другую</button>
+      <button class="primary" id="btnAnalyze">Получить рекомендации от Claude</button>
+    </div>
+    <div class="hint" id="zoneHint"></div>
+
+    <div class="ai-section">
+      <div class="ai-status" id="aiStatus"><span class="dot"></span><span id="aiStatusText">Анализируем…</span></div>
+      <div class="error-box" id="errorBox"></div>
+      <div class="summary-box" id="summaryBox"></div>
+      <div class="issues" id="issuesBox"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+  var dropzone = $('dropzone'), fileInput = $('fileInput'), workspace = $('workspace');
+  var cardImg = $('cardImg'), heatCanvas = $('heatCanvas'), stagePanel = $('stagePanel');
+  var opacitySlider = $('opacitySlider'), btnAnalyze = $('btnAnalyze'), btnNewImage = $('btnNewImage');
+  var aiStatus = $('aiStatus'), aiStatusText = $('aiStatusText'), errorBox = $('errorBox');
+  var summaryBox = $('summaryBox'), issuesBox = $('issuesBox'), zoneHint = $('zoneHint');
+
+  var currentFile = null;
+  var hotZoneLabels = [];
+
+  dropzone.addEventListener('click', function () { fileInput.click(); });
+  dropzone.addEventListener('dragover', function (e) { e.preventDefault(); dropzone.classList.add('drag'); });
+  dropzone.addEventListener('dragleave', function () { dropzone.classList.remove('drag'); });
+  dropzone.addEventListener('drop', function (e) {
+    e.preventDefault(); dropzone.classList.remove('drag');
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener('change', function () {
+    if (fileInput.files && fileInput.files[0]) handleFile(fileInput.files[0]);
+  });
+  btnNewImage.addEventListener('click', function () {
+    workspace.classList.remove('show');
+    dropzone.style.display = '';
+    resetAiPanel();
+    fileInput.value = '';
+  });
+  opacitySlider.addEventListener('input', function () {
+    heatCanvas.style.opacity = (opacitySlider.value / 100).toFixed(2);
+  });
+
+  function resetAiPanel() {
+    aiStatus.classList.remove('show'); errorBox.classList.remove('show');
+    summaryBox.classList.remove('show'); issuesBox.classList.remove('show');
+    summaryBox.textContent = ''; issuesBox.innerHTML = ''; errorBox.textContent = '';
+    btnAnalyze.disabled = false; btnAnalyze.textContent = 'Получить рекомендации от Claude';
+  }
+
+  function handleFile(file) {
+    if (!file.type.startsWith('image/')) return;
+    currentFile = file;
+    resetAiPanel();
+    var url = URL.createObjectURL(file);
+    cardImg.onload = function () {
+      dropzone.style.display = 'none';
+      workspace.classList.add('show');
+      sizeCanvasToImage();
+      computeSaliency();
+    };
+    cardImg.src = url;
+  }
+
+  function sizeCanvasToImage() {
+    var r = cardImg.getBoundingClientRect();
+    heatCanvas.width = cardImg.naturalWidth;
+    heatCanvas.height = cardImg.naturalHeight;
+    heatCanvas.style.opacity = (opacitySlider.value / 100).toFixed(2);
+  }
+  window.addEventListener('resize', function () { if (workspace.classList.contains('show')) sizeCanvasToImage(); });
+
+  /* ---------------- saliency computation ---------------- */
+  function computeSaliency() {
+    var PW = 160;
+    var scale = PW / cardImg.naturalWidth;
+    var PH = Math.max(1, Math.round(cardImg.naturalHeight * scale));
+
+    var proc = document.createElement('canvas');
+    proc.width = PW; proc.height = PH;
+    var pctx = proc.getContext('2d');
+    pctx.drawImage(cardImg, 0, 0, PW, PH);
+    var img = pctx.getImageData(0, 0, PW, PH);
+    var d = img.data;
+    var n = PW * PH;
+
+    var L = new Float32Array(n), R = new Float32Array(n), G = new Float32Array(n), B = new Float32Array(n);
+    for (var i = 0; i < n; i++) {
+      var o = i * 4;
+      R[i] = d[o]; G[i] = d[o + 1]; B[i] = d[o + 2];
+      L[i] = 0.299 * d[o] + 0.587 * d[o + 1] + 0.114 * d[o + 2];
+    }
+
+    var radius = Math.max(3, Math.round(PW * 0.045));
+    var Lb = boxBlur(L, PW, PH, radius);
+    var Rb = boxBlur(R, PW, PH, radius), Gb = boxBlur(G, PW, PH, radius), Bb = boxBlur(B, PW, PH, radius);
+
+    var contrast = new Float32Array(n), colorC = new Float32Array(n), sal = new Float32Array(n);
+    var maxContrast = 1, maxColor = 1;
+    for (var i2 = 0; i2 < n; i2++) {
+      contrast[i2] = Math.abs(L[i2] - Lb[i2]);
+      var dr = R[i2] - Rb[i2], dg = G[i2] - Gb[i2], db = B[i2] - Bb[i2];
+      colorC[i2] = Math.sqrt(dr * dr + dg * dg + db * db);
+      if (contrast[i2] > maxContrast) maxContrast = contrast[i2];
+      if (colorC[i2] > maxColor) maxColor = colorC[i2];
+    }
+
+    var cx = PW / 2, cy = PH / 2, maxDist = Math.sqrt(cx * cx + cy * cy);
+    var maxSal = 1e-6;
+    for (var y = 0; y < PH; y++) {
+      for (var x = 0; x < PW; x++) {
+        var idx = y * PW + x;
+        var distN = Math.sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy)) / maxDist;
+        var centerBias = Math.exp(-(distN * distN) / (2 * 0.5 * 0.5));
+        var s = 0.45 * (contrast[idx] / maxContrast) + 0.35 * (colorC[idx] / maxColor) + 0.20 * centerBias;
+        sal[idx] = s;
+        if (s > maxSal) maxSal = s;
+      }
+    }
+
+    var heatProc = document.createElement('canvas');
+    heatProc.width = PW; heatProc.height = PH;
+    var hctx = heatProc.getContext('2d');
+    var himg = hctx.createImageData(PW, PH);
+    var stops = heatGradient();
+    for (var i3 = 0; i3 < n; i3++) {
+      var v = Math.min(255, Math.round((sal[i3] / maxSal) * 255));
+      var c = stops[v];
+      var o2 = i3 * 4;
+      himg.data[o2] = c[0]; himg.data[o2 + 1] = c[1]; himg.data[o2 + 2] = c[2];
+      himg.data[o2 + 3] = Math.min(255, Math.round(v * 0.95));
+    }
+    hctx.putImageData(himg, 0, 0);
+
+    var octx = heatCanvas.getContext('2d');
+    octx.imageSmoothingEnabled = true;
+    octx.clearRect(0, 0, heatCanvas.width, heatCanvas.height);
+    octx.drawImage(heatProc, 0, 0, heatCanvas.width, heatCanvas.height);
+
+    computeHotZones(sal, PW, PH);
+  }
+
+  function boxBlur(src, w, h, r) {
+    var tmp = new Float32Array(w * h), out = new Float32Array(w * h);
+    for (var y = 0; y < h; y++) {
+      var rowOff = y * w, sum = 0;
+      for (var k = -r; k <= r; k++) sum += src[rowOff + clamp(k, 0, w - 1)];
+      for (var x = 0; x < w; x++) {
+        tmp[rowOff + x] = sum / (2 * r + 1);
+        sum += src[rowOff + clamp(x + r + 1, 0, w - 1)] - src[rowOff + clamp(x - r, 0, w - 1)];
+      }
+    }
+    for (var x2 = 0; x2 < w; x2++) {
+      var sum2 = 0;
+      for (var k2 = -r; k2 <= r; k2++) sum2 += tmp[clamp(k2, 0, h - 1) * w + x2];
+      for (var y2 = 0; y2 < h; y2++) {
+        out[y2 * w + x2] = sum2 / (2 * r + 1);
+        sum2 += tmp[clamp(y2 + r + 1, 0, h - 1) * w + x2] - tmp[clamp(y2 - r, 0, h - 1) * w + x2];
+      }
+    }
+    return out;
+  }
+  function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+  var _stopsCache = null;
+  function heatGradient() {
+    if (_stopsCache) return _stopsCache;
+    var c = document.createElement('canvas'); c.width = 256; c.height = 1;
+    var gctx = c.getContext('2d');
+    var g = gctx.createLinearGradient(0, 0, 256, 0);
+    g.addColorStop(0.00, '#0a3ea8'); g.addColorStop(0.35, '#1fb6c9');
+    g.addColorStop(0.60, '#7be05a'); g.addColorStop(0.80, '#ffd23f'); g.addColorStop(1.00, '#ff4d3d');
+    gctx.fillStyle = g; gctx.fillRect(0, 0, 256, 1);
+    var d = gctx.getImageData(0, 0, 256, 1).data, arr = [];
+    for (var i = 0; i < 256; i++) arr.push([d[i * 4], d[i * 4 + 1], d[i * 4 + 2]]);
+    _stopsCache = arr;
+    return arr;
+  }
+
+  function computeHotZones(sal, w, h) {
+    var rows = ['верхн', 'средн', 'нижн'], cols = ['лев', 'центр', 'прав'];
+    var rowLabel = ['верхняя часть', 'средняя часть', 'нижняя часть'];
+    var colLabel = ['левая сторона', 'центр', 'правая сторона'];
+    var cellSums = [], cellCounts = [];
+    for (var i = 0; i < 9; i++) { cellSums.push(0); cellCounts.push(0); }
+    for (var y = 0; y < h; y++) {
+      var ry = Math.min(2, Math.floor((y / h) * 3));
+      for (var x = 0; x < w; x++) {
+        var rx = Math.min(2, Math.floor((x / w) * 3));
+        var idx = ry * 3 + rx;
+        cellSums[idx] += sal[y * w + x]; cellCounts[idx]++;
+      }
+    }
+    var avgs = cellSums.map(function (s, i) { return { i: i, v: s / cellCounts[i] }; });
+    avgs.sort(function (a, b) { return b.v - a.v; });
+    var top = avgs.slice(0, 3).map(function (e) {
+      var ry = Math.floor(e.i / 3), rx = e.i % 3;
+      return rowLabel[ry] + ' / ' + colLabel[rx];
+    });
+    hotZoneLabels = top;
+    zoneHint.textContent = 'Расчётные зоны наибольшего внимания: ' + top.join('; ');
+  }
+
+  /* ---------------- Claude analysis ---------------- */
+  btnAnalyze.addEventListener('click', function () { runAnalysis(); });
+
+  function resizeForUpload(file) {
+    return new Promise(function (resolve, reject) {
+      var img = new Image();
+      img.onload = function () {
+        var maxW = 1000;
+        var scale = Math.min(1, maxW / img.naturalWidth);
+        var w = Math.round(img.naturalWidth * scale), h = Math.round(img.naturalHeight * scale);
+        var c = document.createElement('canvas'); c.width = w; c.height = h;
+        c.getContext('2d').drawImage(img, 0, 0, w, h);
+        c.toBlob(function (blob) { blob ? resolve(blob) : reject(new Error('encode failed')); }, 'image/jpeg', 0.85);
+      };
+      img.onerror = reject;
+      img.src = URL.createObjectURL(file);
+    });
+  }
+
+  function runAnalysis() {
+    if (!currentFile) return;
+    errorBox.classList.remove('show');
+    summaryBox.classList.remove('show'); issuesBox.classList.remove('show'); issuesBox.innerHTML = '';
+    aiStatus.classList.add('show'); aiStatusText.textContent = 'Проверяем доступ…';
+    btnAnalyze.disabled = true;
+
+    claude.use('sample').then(function (sample) {
+      if (!sample) { showError('AI-анализ недоступен в этом окне просмотра.'); return; }
+      return sample.limits().catch(function () { return null; }).then(function (limits) {
+        if (!limits || !limits.images) { showError('Этот просмотр не поддерживает отправку изображений для анализа.'); return; }
+        aiStatusText.textContent = 'Готовим изображение…';
+        return resizeForUpload(currentFile).then(function (blob) {
+          aiStatusText.textContent = 'Claude анализирует карточку…';
+          var prompt = 'Ты UX/конверсионный аналитик, разбираешь карточку товара для e-commerce витрины. ' +
+            'По расчёту предиктивного внимания (контраст, цвет, положение в кадре) самые заметные зоны на этой карточке: ' +
+            hotZoneLabels.join('; ') + '. ' +
+            'Проанализируй саму картинку карточки товара и дай практичный разбор. ' +
+            'Ответь СТРОГО в формате JSON без каких-либо пояснений вне JSON: ' +
+            '{"summary": "1-2 предложения общего вывода", ' +
+            '"issues": [{"title": "короткий заголовок проблемы", "zone": "где на карточке (по-русски, коротко)", ' +
+            '"severity": "high|medium|low", "recommendation": "конкретная рекомендация что изменить"}]}. ' +
+            'Дай от 3 до 6 issues, отсортированных по важности (severity), самое важное первым. Пиши по-русски.';
+          return sample.json(prompt, { images: [blob], modelTier: 'default', cache: false });
+        });
+      });
+    }).then(function (data) {
+      if (!data) return;
+      renderResult(data);
+    }).catch(function (err) {
+      handleSampleError(err);
+    }).finally(function () {
+      aiStatus.classList.remove('show');
+      btnAnalyze.disabled = false;
+    });
+  }
+
+  function renderResult(data) {
+    if (data.summary) {
+      summaryBox.textContent = data.summary;
+      summaryBox.classList.add('show');
+    }
+    if (Array.isArray(data.issues)) {
+      data.issues.forEach(function (it) {
+        var sev = ['high', 'medium', 'low'].indexOf(it.severity) >= 0 ? it.severity : 'medium';
+        var row = document.createElement('div');
+        row.className = 'issue ' + sev;
+        row.innerHTML =
+          '<div class="sev">' + sev + '</div>' +
+          '<div class="issue-body">' +
+          '<h4></h4><div class="zone"></div><p></p>' +
+          '</div>';
+        row.querySelector('h4').textContent = it.title || '';
+        row.querySelector('.zone').textContent = it.zone || '';
+        row.querySelector('p').textContent = it.recommendation || '';
+        issuesBox.appendChild(row);
+      });
+      issuesBox.classList.add('show');
+    }
+  }
+
+  function showError(msg) { errorBox.textContent = msg; errorBox.classList.add('show'); }
+
+  function handleSampleError(err) {
+    var code = err && err.code;
+    var byCode = {
+      not_granted: 'Вы не разрешили этой странице обращаться к Claude — функция недоступна в этом окне.',
+      sampling_disabled: 'Claude недоступен для этого аккаунта/организации.',
+      not_declared: 'Функция анализа не подключена для этой страницы.',
+      capability_disabled: 'Функция анализа недоступна в этом окне просмотра.',
+      images_unavailable: 'Этот просмотр не поддерживает отправку изображений.',
+      rate_limited: 'Слишком много запросов подряд — подождите немного и попробуйте снова.',
+      session_expired: 'Сессия истекла — обновите страницу и войдите заново.',
+      image_rejected: 'Файл не подошёл (формат/размер) — попробуйте другое изображение.',
+      refused: 'Claude отказался анализировать это изображение.',
+      empty_completion: 'Не удалось получить ответ — попробуйте ещё раз с другим изображением.',
+      invalid_json: 'Ответ пришёл в неожиданном формате — попробуйте ещё раз.',
+      upstream_error: 'Временная ошибка сервиса — попробуйте ещё раз через минуту.'
+    };
+    showError(byCode[code] || 'Не удалось получить анализ. Попробуйте ещё раз.');
+  }
+})();
+</script>
+</body>
+</html>
