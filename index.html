@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gaze Lab — прототип айтрекинга</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0b0f0d;
+    --bg-panel: #10201aee;
+    --bg-panel-solid: #101715;
+    --line: #24352c;
+    --line-soft: #1a2620;
+    --ink: #eaf2ec;
+    --ink-dim: #8fa79b;
+    --ink-faint: #5a6e64;
+    --amber: #ffab33;
+    --amber-dim: #7a5a26;
+    --teal: #4fd1c5;
+    --red: #e8654a;
+    --font-ui: 'Space Grotesk', system-ui, sans-serif;
+    --font-mono: 'IBM Plex Mono', 'SFMono-Regular', Consolas, monospace;
+  }
+  :root:not([data-theme="light"]) { color-scheme: dark; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0b0f0d; --ink: #eaf2ec;
+    }
+  }
+  :root[data-theme="dark"] { --bg: #0b0f0d; --ink: #eaf2ec; }
+
+  * { box-sizing: border-box; }
+  html, body {
+    height: 100%; margin: 0; overflow: hidden;
+    background: var(--bg); color: var(--ink);
+    font-family: var(--font-ui);
+  }
+
+  .app { display: flex; flex-direction: column; height: 100vh; }
+
+  /* ---------- topbar ---------- */
+  .topbar {
+    display: flex; align-items: center; gap: 18px;
+    padding: 10px 18px;
+    background: var(--bg-panel-solid);
+    border-bottom: 1px solid var(--line);
+    flex-wrap: wrap;
+  }
+  .brand { display: flex; align-items: baseline; gap: 8px; margin-right: 6px; }
+  .brand-mark { color: var(--amber); font-size: 18px; }
+  .brand-title { font-weight: 600; font-size: 15px; letter-spacing: 0.01em; }
+  .brand-sub { color: var(--ink-faint); font-size: 11px; font-family: var(--font-mono); }
+
+  .status {
+    font-family: var(--font-mono); font-size: 11px; color: var(--ink-dim);
+    display: flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border: 1px solid var(--line-soft); border-radius: 3px;
+  }
+  .status .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-faint); }
+  .status.ok .dot { background: #63d08a; box-shadow: 0 0 6px #63d08a; }
+  .status.warn .dot { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
+  .status.err .dot { background: var(--red); box-shadow: 0 0 6px var(--red); }
+
+  .controls { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+  button {
+    font-family: var(--font-ui); font-size: 12.5px; font-weight: 500;
+    padding: 7px 13px; border-radius: 3px; border: 1px solid var(--line);
+    background: transparent; color: var(--ink); cursor: pointer;
+    transition: border-color .15s, background .15s, color .15s;
+  }
+  button:hover:not(:disabled) { border-color: var(--amber); color: var(--amber); }
+  button:disabled { opacity: 0.35; cursor: not-allowed; }
+  button.primary { background: var(--amber); border-color: var(--amber); color: #1a1400; }
+  button.primary:hover:not(:disabled) { background: #ffbb55; color: #1a1400; }
+  button.active { border-color: var(--teal); color: var(--teal); }
+  button.danger:hover:not(:disabled) { border-color: var(--red); color: var(--red); }
+
+  /* ---------- stage ---------- */
+  .stage-wrap { flex: 1; position: relative; overflow: hidden; }
+  .stage {
+    position: absolute; inset: 0; overflow: hidden;
+    background: #eef1ea;
+  }
+  #overlayCanvas { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
+
+  .gaze-dot, .mouse-dot {
+    position: fixed; z-index: 6; pointer-events: none;
+    border-radius: 50%; transform: translate(-50%, -50%);
+    transition: opacity .15s; opacity: 0;
+  }
+  .gaze-dot {
+    width: 22px; height: 22px;
+    background: radial-gradient(circle, rgba(255,171,51,.55) 0%, rgba(255,171,51,0) 70%);
+    border: 2px solid var(--amber);
+  }
+  .mouse-dot {
+    width: 10px; height: 10px;
+    background: var(--teal); opacity: .85;
+    border: 2px solid #06403c;
+  }
+  .gaze-dot.live, .mouse-dot.live { opacity: 1; }
+
+  /* ---------- side readout ---------- */
+  .readout {
+    position: absolute; right: 14px; bottom: 14px; z-index: 7;
+    background: var(--bg-panel); border: 1px solid var(--line);
+    border-radius: 4px; padding: 10px 14px;
+    font-family: var(--font-mono); font-size: 11px; color: var(--ink-dim);
+    min-width: 190px; backdrop-filter: blur(4px);
+  }
+  .readout div { display: flex; justify-content: space-between; gap: 14px; padding: 2px 0; }
+  .readout b { color: var(--ink); font-weight: 600; }
+  .readout .hl { color: var(--amber); }
+
+  .legend {
+    position: absolute; left: 14px; bottom: 14px; z-index: 7;
+    display: flex; gap: 14px; font-family: var(--font-mono); font-size: 11px; color: var(--ink-dim);
+    background: var(--bg-panel); border: 1px solid var(--line); border-radius: 4px; padding: 8px 12px;
+  }
+  .legend span { display: flex; align-items: center; gap: 6px; }
+  .swatch { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+
+  /* ---------- calibration overlay ---------- */
+  #calibOverlay {
+    position: fixed; inset: 0; z-index: 50; background: #05100c;
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+  }
+  #calibOverlay.show { display: flex; }
+  .calib-instructions {
+    position: absolute; top: 22px; left: 50%; transform: translateX(-50%);
+    text-align: center; color: var(--ink-dim); font-size: 13px; max-width: 520px; line-height: 1.5;
+  }
+  .calib-instructions b { color: var(--amber); }
+  .calib-grid {
+    position: relative; width: min(84vw, 900px); height: min(74vh, 600px);
+  }
+  .calib-dot {
+    position: absolute; width: 46px; height: 46px; transform: translate(-50%, -50%);
+    border-radius: 50%; border: 2px solid var(--ink-faint);
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--font-mono); font-size: 12px; color: var(--ink-dim);
+    cursor: pointer; background: transparent;
+  }
+  .calib-dot::after {
+    content: ''; position: absolute; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-faint);
+  }
+  .calib-dot.done { border-color: #63d08a; }
+  .calib-dot.done::after { background: #63d08a; }
+  .calib-dot.active { border-color: var(--amber); box-shadow: 0 0 0 10px rgba(255,171,51,.08); }
+  .calib-dot.active::after { background: var(--amber); }
+
+  .calib-footer {
+    position: absolute; bottom: 26px; display: flex; flex-direction: column; align-items: center; gap: 10px;
+  }
+  .calib-progress {
+    font-family: var(--font-mono); font-size: 12px; color: var(--ink-dim);
+  }
+
+  /* ---------- error banner ---------- */
+  #errorBanner {
+    position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 40;
+    background: #2a120c; border: 1px solid var(--red); color: #ffb4a3;
+    font-size: 12.5px; padding: 9px 16px; border-radius: 4px; max-width: 560px; text-align: center;
+    display: none; line-height: 1.5;
+  }
+
+  /* ---------- demo landing content (tracked page) ---------- */
+  .demo-page { position: relative; height: 100%; overflow: hidden; color: #17231c; }
+  .demo-nav {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 40px; border-bottom: 1px solid #d8ddd0;
+  }
+  .demo-logo { font-weight: 700; font-size: 16px; letter-spacing: -0.01em; }
+  .demo-nav-links { display: flex; gap: 26px; font-size: 13px; color: #4a5a4f; }
+  .demo-cta-nav {
+    background: #17231c; color: #eef1ea; padding: 8px 16px; border-radius: 3px; font-size: 13px;
+  }
+  .demo-hero {
+    display: flex; align-items: center; gap: 48px;
+    padding: 48px 60px 32px;
+  }
+  .demo-hero-text { flex: 1.1; max-width: 480px; }
+  .demo-hero-text h1 { font-size: 34px; line-height: 1.12; margin: 0 0 14px; letter-spacing: -0.015em; }
+  .demo-hero-text p { color: #4a5a4f; font-size: 14.5px; line-height: 1.6; margin: 0 0 22px; max-width: 400px; }
+  .demo-cta-row { display: flex; gap: 12px; }
+  .demo-cta-primary { background: #d97a3f; color: #fff; padding: 11px 20px; border-radius: 3px; font-size: 13.5px; font-weight: 600; }
+  .demo-cta-secondary { border: 1px solid #c7cdc0; color: #2c362f; padding: 11px 20px; border-radius: 3px; font-size: 13.5px; }
+  .demo-hero-visual {
+    flex: 1; height: 230px; border-radius: 6px;
+    background: linear-gradient(135deg, #cdd8c6, #a9c4b8);
+    display: flex; align-items: center; justify-content: center;
+    color: #4a5a4f; font-size: 12px; font-family: var(--font-mono);
+  }
+  .demo-features {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px;
+    padding: 8px 60px 32px;
+  }
+  .demo-card {
+    border: 1px solid #d8ddd0; border-radius: 6px; padding: 18px;
+    background: #f6f7f2;
+  }
+  .demo-card .icon {
+    width: 30px; height: 30px; border-radius: 6px; background: #d97a3f22;
+    color: #d97a3f; display: flex; align-items: center; justify-content: center; font-size: 15px; margin-bottom: 10px;
+  }
+  .demo-card h3 { font-size: 14px; margin: 0 0 6px; }
+  .demo-card p { font-size: 12.5px; color: #5a6a5f; margin: 0; line-height: 1.5; }
+  .demo-footer-cta {
+    margin: 0 60px; padding: 26px 30px; border-radius: 6px;
+    background: #17231c; color: #eef1ea;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .demo-footer-cta div div:first-child { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+  .demo-footer-cta div div:last-child { font-size: 12.5px; color: #aebbb3; }
+
+  @media (max-width: 760px) {
+    .demo-hero { flex-direction: column; padding: 24px; }
+    .demo-features { grid-template-columns: 1fr; padding: 8px 24px 24px; }
+    .demo-footer-cta { margin: 0 24px; flex-direction: column; gap: 14px; align-items: flex-start; }
+    .controls { width: 100%; }
+    .readout, .legend { font-size: 10px; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <div class="topbar">
+    <div class="brand">
+      <span class="brand-mark">◎</span>
+      <span class="brand-title">Gaze Lab</span>
+      <span class="brand-sub">webcam gaze-tracking · демо-прототип</span>
+    </div>
+
+    <div id="camStatus" class="status warn"><span class="dot"></span><span id="camStatusText">камера: инициализация…</span></div>
+
+    <div class="controls">
+      <button id="btnCalibrate">Калибровка</button>
+      <button id="btnStart" disabled>Начать запись</button>
+      <button id="btnStop" disabled class="danger">Стоп</button>
+      <button id="btnHeat" disabled>Heatmap</button>
+      <button id="btnPath" disabled>Scanpath</button>
+      <button id="btnReset" disabled>Сброс</button>
+    </div>
+  </div>
+
+  <div class="stage-wrap">
+    <div id="errorBanner"></div>
+
+    <div class="stage" id="stage">
+      <div class="demo-page" id="demoPage">
+        <div class="demo-nav">
+          <div class="demo-logo">brightpath</div>
+          <div class="demo-nav-links"><span>Продукт</span><span>Тарифы</span><span>Кейсы</span><span>О нас</span></div>
+          <div class="demo-cta-nav">Начать бесплатно</div>
+        </div>
+        <div class="demo-hero">
+          <div class="demo-hero-text">
+            <h1>Онбординг, который проходят, а не бросают</h1>
+            <p>Адаптивные учебные треки под уровень каждого сотрудника — на основе того, где они реально теряются, а не догадок HR.</p>
+            <div class="demo-cta-row">
+              <div class="demo-cta-primary">Запросить демо</div>
+              <div class="demo-cta-secondary">Посмотреть кейс</div>
+            </div>
+          </div>
+          <div class="demo-hero-visual">[ иллюстрация продукта ]</div>
+        </div>
+        <div class="demo-features">
+          <div class="demo-card"><div class="icon">◆</div><h3>Адаптивные треки</h3><p>Сложность подстраивается под темп прохождения каждого модуля.</p></div>
+          <div class="demo-card"><div class="icon">◆</div><h3>Аналитика для HR</h3><p>Видно, на каком шаге сотрудники застревают чаще всего.</p></div>
+          <div class="demo-card"><div class="icon">◆</div><h3>Интеграция за день</h3><p>Подключается к текущей LMS без миграции контента.</p></div>
+        </div>
+        <div class="demo-footer-cta">
+          <div><div>Готовы посмотреть на своих данных?</div><div>15 минут звонка — без обязательств</div></div>
+          <div class="demo-cta-primary">Забронировать звонок</div>
+        </div>
+      </div>
+
+      <canvas id="overlayCanvas"></canvas>
+    </div>
+
+    <div class="gaze-dot" id="gazeDot"></div>
+    <div class="mouse-dot" id="mouseDot"></div>
+
+    <div class="legend">
+      <span><i class="swatch" style="background:var(--amber)"></i>взгляд</span>
+      <span><i class="swatch" style="background:var(--teal)"></i>курсор мыши</span>
+    </div>
+    <div class="readout" id="readout">
+      <div><span>точек взгляда</span><b id="rGaze">0</b></div>
+      <div><span>время записи</span><b id="rTime">0.0s</b></div>
+      <div><span>Δ взгляд↔мышь</span><b id="rDelta">—</b></div>
+      <div><span>режим</span><b id="rMode" class="hl">ожидание</b></div>
+    </div>
+  </div>
+
+  <div id="calibOverlay">
+    <div class="calib-instructions">
+      Смотрите прямо на точку и <b>кликните по ней 5 раз</b>, не отводя взгляда. Пройдите все 9 точек — так модель учится сопоставлять положение глаз с координатами экрана.
+    </div>
+    <div class="calib-grid" id="calibGrid"></div>
+    <div class="calib-footer">
+      <div class="calib-progress" id="calibProgress">откалибровано точек: 0 / 9</div>
+      <button id="btnCalibDone" class="primary" disabled>Готово → к демо-странице</button>
+    </div>
+  </div>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/webgazer@3.3.0/dist/webgazer.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var $ = function (id) { return document.getElementById(id); };
+  var camStatus = $('camStatus'), camStatusText = $('camStatusText');
+  var btnCalibrate = $('btnCalibrate'), btnStart = $('btnStart'), btnStop = $('btnStop');
+  var btnHeat = $('btnHeat'), btnPath = $('btnPath'), btnReset = $('btnReset');
+  var calibOverlay = $('calibOverlay'), calibGrid = $('calibGrid'), calibProgress = $('calibProgress'), btnCalibDone = $('btnCalibDone');
+  var gazeDot = $('gazeDot'), mouseDot = $('mouseDot');
+  var overlayCanvas = $('overlayCanvas'), stage = $('stage');
+  var errorBanner = $('errorBanner');
+  var rGaze = $('rGaze'), rTime = $('rTime'), rDelta = $('rDelta'), rMode = $('rMode');
+
+  var ctx = overlayCanvas.getContext('2d');
+  var recording = false;
+  var viewMode = 'live'; // live | heat | path
+  var gazePoints = [];   // {x,y,t}
+  var mousePoints = [];  // {x,y,t}
+  var lastMouse = null;
+  var recordStart = 0;
+  var timerHandle = null;
+  var calibCounts = new Array(9).fill(0);
+  var CLICKS_NEEDED = 5;
+
+  function showError(msg) {
+    errorBanner.textContent = msg;
+    errorBanner.style.display = 'block';
+  }
+  function setCam(state, text) {
+    camStatus.className = 'status ' + state;
+    camStatusText.textContent = text;
+  }
+
+  function resizeCanvas() {
+    var r = stage.getBoundingClientRect();
+    overlayCanvas.width = r.width;
+    overlayCanvas.height = r.height;
+    redraw();
+  }
+  window.addEventListener('resize', resizeCanvas);
+
+  /* ---------------- calibration grid ---------------- */
+  var positions = [
+    [8, 10], [50, 10], [92, 10],
+    [8, 50], [50, 50], [92, 50],
+    [8, 90], [50, 90], [92, 90]
+  ];
+  positions.forEach(function (pos, i) {
+    var d = document.createElement('div');
+    d.className = 'calib-dot';
+    d.style.left = pos[0] + '%';
+    d.style.top = pos[1] + '%';
+    d.dataset.index = i;
+    d.textContent = CLICKS_NEEDED;
+    d.addEventListener('click', function () {
+      if (calibCounts[i] >= CLICKS_NEEDED) return;
+      calibCounts[i]++;
+      var remaining = CLICKS_NEEDED - calibCounts[i];
+      d.textContent = remaining > 0 ? remaining : '';
+      d.classList.add('active');
+      if (calibCounts[i] >= CLICKS_NEEDED) d.classList.add('done');
+      updateCalibProgress();
+    });
+    calibGrid.appendChild(d);
+  });
+  function updateCalibProgress() {
+    var done = calibCounts.filter(function (c) { return c >= CLICKS_NEEDED; }).length;
+    calibProgress.textContent = 'откалибровано точек: ' + done + ' / 9';
+    btnCalibDone.disabled = done < 9;
+  }
+
+  btnCalibrate.addEventListener('click', function () {
+    calibOverlay.classList.add('show');
+  });
+  btnCalibDone.addEventListener('click', function () {
+    calibOverlay.classList.remove('show');
+    btnStart.disabled = false;
+    setCam('ok', 'камера: калибровка выполнена');
+  });
+
+  /* ---------------- webgazer setup ---------------- */
+  function initWebgazer() {
+    if (typeof webgazer === 'undefined') {
+      setCam('err', 'камера: библиотека не загрузилась');
+      showError('Не удалось загрузить webgazer.js (возможно заблокирован внешний скрипт или нет сети). Откройте опубликованную страницу напрямую в новой вкладке.');
+      return;
+    }
+    webgazer.saveDataAcrossSessions(false);
+    webgazer.showVideo(true);
+    webgazer.showFaceOverlay(false);
+    webgazer.showFaceFeedbackBox(false);
+    webgazer.showPredictionPoints(false);
+    webgazer.applyKalmanFilter(true);
+
+    webgazer.setGazeListener(function (data) {
+      if (!data) return;
+      gazeDot.style.left = data.x + 'px';
+      gazeDot.style.top = data.y + 'px';
+      gazeDot.classList.add('live');
+      if (recording) {
+        gazePoints.push({ x: data.x, y: data.y, t: performance.now() - recordStart });
+      }
+    });
+
+    webgazer.begin().then(function () {
+      setCam('warn', 'камера: подключена — пройдите калибровку');
+      btnCalibrate.disabled = false;
+    }).catch(function (err) {
+      setCam('err', 'камера: нет доступа');
+      showError('Доступ к камере не получен (' + (err && err.message ? err.message : 'ошибка') + '). Разрешите доступ к веб-камере в браузере и обновите страницу — если это встроенный просмотр, откройте страницу в отдельной вкладке.');
+    });
+  }
+
+  document.addEventListener('mousemove', function (e) {
+    var r = stage.getBoundingClientRect();
+    lastMouse = { x: e.clientX, y: e.clientY };
+    mouseDot.style.left = e.clientX + 'px';
+    mouseDot.style.top = e.clientY + 'px';
+    mouseDot.classList.add('live');
+    if (recording && e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
+      mousePoints.push({ x: e.clientX, y: e.clientY, t: performance.now() - recordStart });
+    }
+  });
+
+  /* ---------------- recording ---------------- */
+  btnStart.addEventListener('click', function () {
+    recording = true;
+    gazePoints = []; mousePoints = [];
+    recordStart = performance.now();
+    viewMode = 'live';
+    btnStart.disabled = true; btnStop.disabled = false;
+    btnHeat.disabled = true; btnPath.disabled = true; btnReset.disabled = true;
+    rMode.textContent = 'запись…';
+    ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    timerHandle = setInterval(function () {
+      rTime.textContent = ((performance.now() - recordStart) / 1000).toFixed(1) + 's';
+      rGaze.textContent = gazePoints.length;
+    }, 150);
+  });
+
+  btnStop.addEventListener('click', function () {
+    recording = false;
+    clearInterval(timerHandle);
+    btnStart.disabled = false; btnStop.disabled = true;
+    btnHeat.disabled = gazePoints.length === 0;
+    btnPath.disabled = gazePoints.length === 0;
+    btnReset.disabled = gazePoints.length === 0;
+    rMode.textContent = 'остановлено';
+    computeDelta();
+    if (gazePoints.length > 0) { viewMode = 'heat'; setActiveViewButton(); redraw(); }
+  });
+
+  btnReset.addEventListener('click', function () {
+    gazePoints = []; mousePoints = [];
+    ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    rGaze.textContent = '0'; rTime.textContent = '0.0s'; rDelta.textContent = '—'; rMode.textContent = 'ожидание';
+    btnHeat.disabled = true; btnPath.disabled = true; btnReset.disabled = true;
+    viewMode = 'live'; setActiveViewButton();
+  });
+
+  btnHeat.addEventListener('click', function () { viewMode = (viewMode === 'heat') ? 'live' : 'heat'; setActiveViewButton(); redraw(); });
+  btnPath.addEventListener('click', function () { viewMode = (viewMode === 'path') ? 'live' : 'path'; setActiveViewButton(); redraw(); });
+  function setActiveViewButton() {
+    btnHeat.classList.toggle('active', viewMode === 'heat');
+    btnPath.classList.toggle('active', viewMode === 'path');
+    rMode.textContent = viewMode === 'heat' ? 'heatmap' : viewMode === 'path' ? 'scanpath' : (recording ? 'запись…' : 'просмотр');
+  }
+
+  function computeDelta() {
+    if (gazePoints.length === 0 || mousePoints.length === 0) { rDelta.textContent = '—'; return; }
+    var total = 0, n = 0;
+    gazePoints.forEach(function (g) {
+      // nearest mouse sample in time
+      var best = null, bestDt = Infinity;
+      for (var i = 0; i < mousePoints.length; i++) {
+        var dt = Math.abs(mousePoints[i].t - g.t);
+        if (dt < bestDt) { bestDt = dt; best = mousePoints[i]; }
+      }
+      if (best && bestDt < 400) {
+        total += Math.hypot(g.x - best.x, g.y - best.y);
+        n++;
+      }
+    });
+    rDelta.textContent = n > 0 ? Math.round(total / n) + 'px' : '—';
+  }
+
+  /* ---------------- drawing ---------------- */
+  function redraw() {
+    var r = stage.getBoundingClientRect();
+    ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    if (viewMode === 'heat') drawHeatmap(r);
+    else if (viewMode === 'path') drawScanpath(r);
+  }
+
+  function drawHeatmap(stageRect) {
+    var w = overlayCanvas.width, h = overlayCanvas.height;
+    var off = document.createElement('canvas');
+    off.width = w; off.height = h;
+    var octx = off.getContext('2d');
+    octx.globalCompositeOperation = 'lighter';
+    var radius = Math.max(28, Math.min(w, h) * 0.06);
+    gazePoints.forEach(function (p) {
+      var x = p.x - stageRect.left, y = p.y - stageRect.top;
+      if (x < -radius || y < -radius || x > w + radius || y > h + radius) return;
+      var grad = octx.createRadialGradient(x, y, 0, x, y, radius);
+      grad.addColorStop(0, 'rgba(0,0,0,0.10)');
+      grad.addColorStop(1, 'rgba(0,0,0,0)');
+      octx.fillStyle = grad;
+      octx.beginPath(); octx.arc(x, y, radius, 0, Math.PI * 2); octx.fill();
+    });
+    var img = octx.getImageData(0, 0, w, h);
+    var data = img.data;
+    var stops = heatGradient();
+    for (var i = 0; i < data.length; i += 4) {
+      var a = data[i + 3];
+      if (a === 0) continue;
+      var c = stops[Math.min(255, a)];
+      data[i] = c[0]; data[i + 1] = c[1]; data[i + 2] = c[2];
+      data[i + 3] = Math.min(255, a + 70);
+    }
+    octx.putImageData(img, 0, 0);
+    ctx.drawImage(off, 0, 0);
+  }
+
+  var _stopsCache = null;
+  function heatGradient() {
+    if (_stopsCache) return _stopsCache;
+    var c = document.createElement('canvas');
+    c.width = 256; c.height = 1;
+    var gctx = c.getContext('2d');
+    var g = gctx.createLinearGradient(0, 0, 256, 0);
+    g.addColorStop(0.00, '#0a3ea8');
+    g.addColorStop(0.35, '#1fb6c9');
+    g.addColorStop(0.60, '#7be05a');
+    g.addColorStop(0.80, '#ffd23f');
+    g.addColorStop(1.00, '#ff4d3d');
+    gctx.fillStyle = g; gctx.fillRect(0, 0, 256, 1);
+    var d = gctx.getImageData(0, 0, 256, 1).data;
+    var arr = [];
+    for (var i = 0; i < 256; i++) arr.push([d[i * 4], d[i * 4 + 1], d[i * 4 + 2]]);
+    _stopsCache = arr;
+    return arr;
+  }
+
+  function drawScanpath(stageRect) {
+    var pts = gazePoints.map(function (p) { return { x: p.x - stageRect.left, y: p.y - stageRect.top }; });
+    if (pts.length < 2) return;
+    ctx.strokeStyle = 'rgba(255,171,51,0.55)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.stroke();
+    pts.forEach(function (p, i) {
+      ctx.beginPath();
+      ctx.fillStyle = i === 0 ? '#63d08a' : (i === pts.length - 1 ? '#e8654a' : 'rgba(255,171,51,0.75)');
+      ctx.arc(p.x, p.y, i === 0 || i === pts.length - 1 ? 5 : 2.6, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  }
+
+  window.addEventListener('load', function () {
+    resizeCanvas();
+    initWebgazer();
+  });
+})();
+</script>
+</body>
+</html>
