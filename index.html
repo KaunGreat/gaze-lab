@@ -223,6 +223,26 @@
     .controls { width: 100%; }
     .readout, .legend { font-size: 10px; }
   }
+
+  /* ---------- AOI panel ---------- */
+  #aoiPanel {
+    position: absolute; inset: 0; z-index: 8; display: none;
+    pointer-events: none;
+  }
+  #aoiPanel.show { display: block; }
+  .aoi-table {
+    position: absolute; top: 14px; right: 14px; pointer-events: auto;
+    background: var(--bg-panel); border: 1px solid var(--line); border-radius: 4px;
+    padding: 12px 14px; font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-dim);
+    min-width: 320px; backdrop-filter: blur(4px); max-height: calc(100% - 28px); overflow: auto;
+  }
+  .aoi-table h4 { margin: 0 0 8px; font-size: 12px; color: var(--amber); font-family: var(--font-ui); }
+  .aoi-table table { width: 100%; border-collapse: collapse; }
+  .aoi-table th, .aoi-table td { text-align: right; padding: 3px 6px; border-bottom: 1px solid var(--line-soft); }
+  .aoi-table th:first-child, .aoi-table td:first-child { text-align: left; }
+  .aoi-table th { color: var(--ink-faint); font-weight: 500; font-size: 10.5px; }
+  .aoi-table td { color: var(--ink); }
+  .aoi-note { margin-top: 8px; color: var(--ink-faint); font-size: 10.5px; line-height: 1.4; }
 </style>
 </head>
 <body>
@@ -243,6 +263,7 @@
       <button id="btnStop" disabled class="danger">Стоп</button>
       <button id="btnHeat" disabled>Heatmap</button>
       <button id="btnPath" disabled>Scanpath</button>
+      <button id="btnAOI" disabled>AOI-аналитика</button>
       <button id="btnExport" disabled>Экспорт JSON</button>
       <button id="btnReset" disabled>Сброс</button>
     </div>
@@ -281,6 +302,7 @@
       </div>
 
       <canvas id="overlayCanvas"></canvas>
+      <div id="aoiPanel"></div>
     </div>
 
     <div class="gaze-dot" id="gazeDot"></div>
@@ -312,6 +334,7 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/webgazer@3.3.0/dist/webgazer.js"></script>
+<script src="shared/gaze-core.js"></script>
 <script>
 (function () {
   'use strict';
@@ -320,6 +343,7 @@
   var camStatus = $('camStatus'), camStatusText = $('camStatusText');
   var btnCalibrate = $('btnCalibrate'), btnStart = $('btnStart'), btnStop = $('btnStop');
   var btnHeat = $('btnHeat'), btnPath = $('btnPath'), btnExport = $('btnExport'), btnReset = $('btnReset');
+  var btnAOI = $('btnAOI');
   var calibOverlay = $('calibOverlay'), calibGrid = $('calibGrid'), calibProgress = $('calibProgress'), btnCalibDone = $('btnCalibDone');
   var gazeDot = $('gazeDot'), mouseDot = $('mouseDot');
   var overlayCanvas = $('overlayCanvas'), stage = $('stage');
@@ -328,9 +352,10 @@
 
   var ctx = overlayCanvas.getContext('2d');
   var recording = false;
-  var viewMode = 'live'; // live | heat | path
+  var viewMode = 'live'; // live | heat | path | aoi
   var gazePoints = [];   // {x,y,t}
   var mousePoints = [];  // {x,y,t}
+  var lastFixations = null; // кэш I-VT фиксаций для текущей сессии
   var lastMouse = null;
   var recordStart = 0;
   var timerHandle = null;
@@ -548,12 +573,13 @@
     }
     recording = true;
     gazePoints = []; mousePoints = [];
+    lastFixations = null;
     recordStart = performance.now();
     lastGazeT = -Infinity;
     viewMode = 'live';
     hideError();
     btnStart.disabled = true; btnStop.disabled = false;
-    btnHeat.disabled = true; btnPath.disabled = true; btnReset.disabled = true; btnExport.disabled = true;
+    btnHeat.disabled = true; btnPath.disabled = true; btnReset.disabled = true; btnExport.disabled = true; btnAOI.disabled = true;
     rMode.textContent = 'запись…';
     ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
     timerHandle = setInterval(function () {
@@ -567,10 +593,13 @@
     clearInterval(timerHandle);
     btnStart.disabled = false; btnStop.disabled = true;
     var hasData = gazePoints.length > 0;
+    // I-VT фиксации считаем один раз на остановке — используются в AOI-режиме и экспорте
+    lastFixations = hasData && window.GazeCore ? GazeCore.detectFixations(gazePoints) : [];
     btnHeat.disabled = !hasData;
     btnPath.disabled = !hasData;
     btnReset.disabled = !hasData;
     btnExport.disabled = !hasData;
+    btnAOI.disabled = !hasData || !window.GazeCore;
     rMode.textContent = 'остановлено';
     computeDelta();
     if (hasData) { viewMode = 'heat'; setActiveViewButton(); redraw(); }
@@ -579,9 +608,11 @@
 
   btnReset.addEventListener('click', function () {
     gazePoints = []; mousePoints = [];
+    lastFixations = null;
+    hideAoiPanel();
     ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
     rGaze.textContent = '0'; rTime.textContent = '0.0s'; rDelta.textContent = '—'; rMode.textContent = 'ожидание';
-    btnHeat.disabled = true; btnPath.disabled = true; btnReset.disabled = true; btnExport.disabled = true;
+    btnHeat.disabled = true; btnPath.disabled = true; btnReset.disabled = true; btnExport.disabled = true; btnAOI.disabled = true;
     viewMode = 'live'; setActiveViewButton();
   });
 
@@ -597,7 +628,8 @@
       calibrated: calibrated,
       durationMs: gazePoints.length ? gazePoints[gazePoints.length - 1].t : 0,
       gazePoints: gazePoints,
-      mousePoints: mousePoints
+      mousePoints: mousePoints,
+      fixations: lastFixations || []   // I-VT фиксации — готовый вход для бэкенда/дашборда
     };
     var blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
     var url = URL.createObjectURL(blob);
@@ -612,10 +644,13 @@
 
   btnHeat.addEventListener('click', function () { viewMode = (viewMode === 'heat') ? 'live' : 'heat'; setActiveViewButton(); redraw(); });
   btnPath.addEventListener('click', function () { viewMode = (viewMode === 'path') ? 'live' : 'path'; setActiveViewButton(); redraw(); });
+  btnAOI.addEventListener('click', function () { viewMode = (viewMode === 'aoi') ? 'live' : 'aoi'; setActiveViewButton(); redraw(); });
   function setActiveViewButton() {
     btnHeat.classList.toggle('active', viewMode === 'heat');
     btnPath.classList.toggle('active', viewMode === 'path');
-    rMode.textContent = viewMode === 'heat' ? 'heatmap' : viewMode === 'path' ? 'scanpath' : (recording ? 'запись…' : 'просмотр');
+    btnAOI.classList.toggle('active', viewMode === 'aoi');
+    if (viewMode !== 'aoi') hideAoiPanel();
+    rMode.textContent = viewMode === 'heat' ? 'heatmap' : viewMode === 'path' ? 'scanpath' : viewMode === 'aoi' ? 'AOI' : (recording ? 'запись…' : 'просмотр');
   }
 
   function computeDelta() {
@@ -640,61 +675,16 @@
     ctx.clearRect(0, 0, r.width, r.height);
     if (viewMode === 'heat') drawHeatmap(r);
     else if (viewMode === 'path') drawScanpath(r);
+    else if (viewMode === 'aoi') renderAOI(r);
   }
 
+  // Heatmap — из общего core (shared/gaze-core.js), локальная обёртка переводит
+  // экранные координаты точек в систему координат stage.
   function drawHeatmap(stageRect) {
-    var w = stageRect.width, h = stageRect.height;
-    // рисуем тепловую карту в пониженном разрешении и растягиваем — быстрее на больших экранах
-    var scale = Math.min(1, 900 / Math.max(w, h));
-    var cw = Math.max(1, Math.round(w * scale)), ch = Math.max(1, Math.round(h * scale));
-    var off = document.createElement('canvas');
-    off.width = cw; off.height = ch;
-    var octx = off.getContext('2d');
-    octx.globalCompositeOperation = 'lighter';
-    octx.scale(scale, scale);
-    var radius = Math.max(28, Math.min(w, h) * 0.06);
-    gazePoints.forEach(function (p) {
-      var x = p.x - stageRect.left, y = p.y - stageRect.top;
-      if (x < -radius || y < -radius || x > w + radius || y > h + radius) return;
-      var grad = octx.createRadialGradient(x, y, 0, x, y, radius);
-      grad.addColorStop(0, 'rgba(0,0,0,0.10)');
-      grad.addColorStop(1, 'rgba(0,0,0,0)');
-      octx.fillStyle = grad;
-      octx.beginPath(); octx.arc(x, y, radius, 0, Math.PI * 2); octx.fill();
+    var events = gazePoints.map(function (p) {
+      return { x: p.x - stageRect.left, y: p.y - stageRect.top, t: p.t };
     });
-    var img = octx.getImageData(0, 0, cw, ch);
-    var data = img.data;
-    var stops = heatGradient();
-    for (var i = 0; i < data.length; i += 4) {
-      var a = data[i + 3];
-      if (a === 0) continue;
-      var c = stops[Math.min(255, a)];
-      data[i] = c[0]; data[i + 1] = c[1]; data[i + 2] = c[2];
-      data[i + 3] = Math.min(255, a + 70);
-    }
-    octx.putImageData(img, 0, 0);
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(off, 0, 0, cw, ch, 0, 0, w, h);
-  }
-
-  var _stopsCache = null;
-  function heatGradient() {
-    if (_stopsCache) return _stopsCache;
-    var c = document.createElement('canvas');
-    c.width = 256; c.height = 1;
-    var gctx = c.getContext('2d');
-    var g = gctx.createLinearGradient(0, 0, 256, 0);
-    g.addColorStop(0.00, '#0a3ea8');
-    g.addColorStop(0.35, '#1fb6c9');
-    g.addColorStop(0.60, '#7be05a');
-    g.addColorStop(0.80, '#ffd23f');
-    g.addColorStop(1.00, '#ff4d3d');
-    gctx.fillStyle = g; gctx.fillRect(0, 0, 256, 1);
-    var d = gctx.getImageData(0, 0, 256, 1).data;
-    var arr = [];
-    for (var i = 0; i < 256; i++) arr.push([d[i * 4], d[i * 4 + 1], d[i * 4 + 2]]);
-    _stopsCache = arr;
-    return arr;
+    GazeCore.drawHeatmap(ctx, events, stageRect.width, stageRect.height);
   }
 
   function drawScanpath(stageRect) {
@@ -721,6 +711,87 @@
       ctx.arc(pts[k].x, pts[k].y, (k === 0 || last) ? 5 : 2.6, 0, Math.PI * 2);
       ctx.fill();
     }
+  }
+
+  /* ---------------- AOI-анализ (демо-страница) ---------------- */
+  var aoiPanel = $('aoiPanel');
+  var AOI_DEFS = [
+    { sel: '.demo-logo',        id: 'Логотип' },
+    { sel: '.demo-nav-links',   id: 'Меню' },
+    { sel: '.demo-cta-nav',     id: 'CTA в шапке' },
+    { sel: '.demo-hero-text h1', id: 'Заголовок H1' },
+    { sel: '.demo-hero p',      id: 'Подзаголовок' },
+    { sel: '.demo-cta-primary', id: 'CTA «Демо» (все)' },
+    { sel: '.demo-cta-secondary', id: 'CTA «Кейс»' },
+    { sel: '.demo-hero-visual', id: 'Иллюстрация' },
+    { sel: '.demo-card',        id: 'Карточка ◆' },
+    { sel: '.demo-footer-cta',  id: 'Футер-блок' }
+  ];
+
+  function collectAOIs() {
+    var list = [];
+    var counters = {};
+    AOI_DEFS.forEach(function (d) {
+      document.querySelectorAll(d.sel).forEach(function (el, idx) {
+        var label = d.id;
+        if (idx > 0 || counters[d.id] !== undefined) {
+          counters[d.id] = (counters[d.id] || 1) + 1;
+          label = d.id + ' #' + counters[d.id];
+        } else counters[d.id] = 1;
+        list.push({ id: label, rect: GazeCore.rectFromEl(el), el: el });
+      });
+    });
+    return list;
+  }
+
+  function renderAOI(stageRect) {
+    hideAoiPanel();
+    if (!window.GazeCore) return;
+    var fixations = lastFixations || [];
+    var aois = collectAOIs();
+    // метрики считаем в экранных координатах (как и фиксации), отрисовку — в координатах stage
+    var metrics = GazeCore.analyzeAOI(fixations, aois);
+    var totalDwell = metrics.reduce(function (s, m) { return s + m.dwellMs; }, 0);
+
+    ctx.save();
+    ctx.lineWidth = 1.5;
+    ctx.font = '11px "IBM Plex Mono", monospace';
+    aois.forEach(function (a) {
+      var r = { x: a.rect.left - stageRect.left, y: a.rect.top - stageRect.top, w: a.rect.width, h: a.rect.height };
+      ctx.strokeStyle = 'rgba(79,209,197,0.85)';
+      ctx.strokeRect(r.x, r.y, r.w, r.h);
+      ctx.fillStyle = 'rgba(79,209,197,0.9)';
+      ctx.fillText(a.id, r.x + 3, r.y + 12);
+    });
+    // центры фиксаций поверх AOI
+    fixations.forEach(function (f) {
+      var x = f.x - stageRect.left, y = f.y - stageRect.top;
+      var rad = 4 + Math.min(14, f.duration / 60);
+      ctx.beginPath();
+      ctx.arc(x, y, rad, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,171,51,0.35)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,171,51,0.9)';
+      ctx.stroke();
+    });
+    ctx.restore();
+
+    var rows = metrics.map(function (m) {
+      var share = totalDwell ? (m.dwellMs / totalDwell * 100).toFixed(0) + '%' : '—';
+      var ttfb = m.firstHitT === null ? '—' : (m.firstHitT / 1000).toFixed(1) + 's';
+      return '<tr><td>' + m.id + '</td><td>' + (m.dwellMs / 1000).toFixed(1) + 's</td><td>' + share + '</td><td>' + m.count + '</td><td>' + ttfb + '</td></tr>';
+    }).join('');
+    aoiPanel.innerHTML =
+      '<div class="aoi-table"><h4>AOI · фиксации: ' + fixations.length + '</h4>' +
+      '<table><thead><tr><th>зона</th><th>dwell</th><th>доля</th><th>фиксаций</th><th>TTFB</th></tr></thead>' +
+      '<tbody>' + (rows || '<tr><td colspan="5">нет зафиксированных фиксаций — попробуйте сессию подлиннее</td></tr>') + '</tbody></table>' +
+      '<div class="aoi-note">Порог I-VT: 30 px/s, мин. длительность 100 мс. TTFB — время до первой фиксации в зоне.</div></div>';
+    aoiPanel.classList.add('show');
+  }
+
+  function hideAoiPanel() {
+    aoiPanel.classList.remove('show');
+    aoiPanel.innerHTML = '';
   }
 
   window.addEventListener('load', function () {
