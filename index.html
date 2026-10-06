@@ -243,6 +243,7 @@
       <button id="btnStop" disabled class="danger">Стоп</button>
       <button id="btnHeat" disabled>Heatmap</button>
       <button id="btnPath" disabled>Scanpath</button>
+      <button id="btnExport" disabled>Экспорт JSON</button>
       <button id="btnReset" disabled>Сброс</button>
     </div>
   </div>
@@ -318,7 +319,7 @@
   var $ = function (id) { return document.getElementById(id); };
   var camStatus = $('camStatus'), camStatusText = $('camStatusText');
   var btnCalibrate = $('btnCalibrate'), btnStart = $('btnStart'), btnStop = $('btnStop');
-  var btnHeat = $('btnHeat'), btnPath = $('btnPath'), btnReset = $('btnReset');
+  var btnHeat = $('btnHeat'), btnPath = $('btnPath'), btnExport = $('btnExport'), btnReset = $('btnReset');
   var calibOverlay = $('calibOverlay'), calibGrid = $('calibGrid'), calibProgress = $('calibProgress'), btnCalibDone = $('btnCalibDone');
   var gazeDot = $('gazeDot'), mouseDot = $('mouseDot');
   var overlayCanvas = $('overlayCanvas'), stage = $('stage');
@@ -335,10 +336,18 @@
   var timerHandle = null;
   var calibCounts = new Array(9).fill(0);
   var CLICKS_NEEDED = 5;
+  var MAX_POINTS = 50000;        // защита памяти при длинных сессиях
+  var MIN_GAZE_INTERVAL = 30;    // мс: троттлинг сэмплов webgazer (~60fps -> ~33fps)
+  var lastGazeT = -Infinity;
+  var calibrated = false;
+  var sessionSeq = 0;
 
   function showError(msg) {
     errorBanner.textContent = msg;
     errorBanner.style.display = 'block';
+  }
+  function hideError() {
+    errorBanner.style.display = 'none';
   }
   function setCam(state, text) {
     camStatus.className = 'status ' + state;
@@ -347,8 +356,12 @@
 
   function resizeCanvas() {
     var r = stage.getBoundingClientRect();
-    overlayCanvas.width = r.width;
-    overlayCanvas.height = r.height;
+    var dpr = window.devicePixelRatio || 1;
+    overlayCanvas.width = Math.round(r.width * dpr);
+    overlayCanvas.height = Math.round(r.height * dpr);
+    overlayCanvas.style.width = r.width + 'px';
+    overlayCanvas.style.height = r.height + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     redraw();
   }
   window.addEventListener('resize', resizeCanvas);
@@ -373,6 +386,8 @@
       d.textContent = remaining > 0 ? remaining : '';
       d.classList.add('active');
       if (calibCounts[i] >= CLICKS_NEEDED) d.classList.add('done');
+      var dr = d.getBoundingClientRect();
+      collectCalibSample(dr.left + dr.width / 2, dr.top + dr.height / 2);
       updateCalibProgress();
     });
     calibGrid.appendChild(d);
@@ -383,45 +398,131 @@
     btnCalibDone.disabled = done < 9;
   }
 
+  // Собираем реальные сэмплы webgazer во время калибровки и обучаем модель
+  // на координатах целевых точек — так калибровка перестаёт быть декорацией.
+  var calibSamples = [];   // [{x, y}] — предсказания взгляда в момент клика
+  var calibTargets = [];   // [{x, y}] — экранные координаты цели клика
+  var pendingSample = false;
+
+  function collectCalibSample(targetX, targetY) {
+    if (typeof webgazer === 'undefined') return;
+    try {
+      var prev = webgazer.currentGazeData;
+      if (!prev || !prev.gaze) return; // нет ещё ни одного предсказания
+      pendingSample = true;
+      webgazer.setGazeListener(function (data, elapsedTime) {
+        webgazer.setGazeListener(prev); // восстановить основной слушатель
+        pendingSample = false;
+        if (!data) return;
+        calibSamples.push({ x: data.x, y: data.y });
+        calibTargets.push({ x: targetX, y: targetY });
+      });
+      // страховка: если слушатель не сработает, вернуть основного через 2с
+      setTimeout(function () {
+        if (pendingSample) {
+          pendingSample = false;
+          webgazer.setGazeListener(prev);
+        }
+      }, 2000);
+    } catch (e) { /* не блокируем UI калибровки */ }
+  }
+
   btnCalibrate.addEventListener('click', function () {
+    hideError();
+    calibSamples = []; calibTargets = [];
     calibOverlay.classList.add('show');
   });
+
   btnCalibDone.addEventListener('click', function () {
     calibOverlay.classList.remove('show');
-    btnStart.disabled = false;
+    calibrated = true;
     setCam('ok', 'камера: калибровка выполнена');
+
+    if (typeof webgazer !== 'undefined' && calibSamples.length >= 5) {
+      try {
+        webgazer.setGazeListener(null);
+        webgazer.clearTrackers();
+        calibSamples.forEach(function (s, i) {
+          webgazer.addTracker(s.x, s.y, calibTargets[i].x, calibTargets[i].y);
+        });
+        webgazer.trainModel();
+        webgazer.setGazeListener(onGaze);
+      } catch (e) {
+        showError('Не удалось дообучить модель на ваших данных калибровки: ' + e.message);
+      }
+    } else if (typeof webgazer !== 'undefined') {
+      showError('Собрано мало сэмплов (' + calibSamples.length + '). Модель не дообучена — точность будет низкой. Повторите калибровку.');
+    }
+    btnStart.disabled = false;
   });
 
   /* ---------------- webgazer setup ---------------- */
+  function onGaze(data) {
+    if (!data) return;
+
+    // валидация: отбрасываем NaN/бесконечность и выходы за пределы экрана
+    if (!isFinite(data.x) || !isFinite(data.y)) return;
+    if (data.x < -50 || data.y < -50 ||
+        data.x > window.innerWidth + 50 || data.y > window.innerHeight + 50) return;
+
+    gazeDot.style.left = data.x + 'px';
+    gazeDot.style.top = data.y + 'px';
+    gazeDot.classList.add('live');
+
+    if (!recording) return;
+
+    var t = performance.now() - recordStart;
+    // троттлинг: не чаще MIN_GAZE_INTERVAL мс
+    if (t - lastGazeT < MIN_GAZE_INTERVAL) return;
+    lastGazeT = t;
+
+    gazePoints.push({ x: Math.round(data.x), y: Math.round(data.y), t: Math.round(t) });
+    if (gazePoints.length > MAX_POINTS) gazePoints.shift();
+  }
+
   function initWebgazer() {
     if (typeof webgazer === 'undefined') {
       setCam('err', 'камера: библиотека не загрузилась');
       showError('Не удалось загрузить webgazer.js (возможно заблокирован внешний скрипт или нет сети). Откройте опубликованную страницу напрямую в новой вкладке.');
+      btnCalibrate.disabled = true;
       return;
     }
+    // HTTPS обязателен для getUserMedia
+    if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+      setCam('err', 'камера: нужен HTTPS');
+      showError('Страница открыта по HTTP — браузер не даст доступ к камере. Откройте её по HTTPS или через localhost.');
+      btnCalibrate.disabled = true;
+      return;
+    }
+
     webgazer.saveDataAcrossSessions(false);
     webgazer.showVideo(true);
     webgazer.showFaceOverlay(false);
     webgazer.showFaceFeedbackBox(false);
     webgazer.showPredictionPoints(false);
     webgazer.applyKalmanFilter(true);
+    webgazer.setRegression('ridge');       // стабильнее, чем default 'weighted'
+    webgazer.beginAtVideoCapture(navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices));
 
-    webgazer.setGazeListener(function (data) {
-      if (!data) return;
-      gazeDot.style.left = data.x + 'px';
-      gazeDot.style.top = data.y + 'px';
-      gazeDot.classList.add('live');
-      if (recording) {
-        gazePoints.push({ x: data.x, y: data.y, t: performance.now() - recordStart });
-      }
-    });
+    webgazer.setGazeListener(onGaze);
 
     webgazer.begin().then(function () {
       setCam('warn', 'камера: подключена — пройдите калибровку');
       btnCalibrate.disabled = false;
     }).catch(function (err) {
+      var name = err && err.name ? err.name : '';
+      var msg = 'Доступ к камере не получен';
+      if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+        msg += ': разрешите доступ к веб-камере в настройках браузера и обновите страницу';
+      } else if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+        msg += ': камера не найдена — подключите устройство';
+      } else if (name === 'NotReadableError' || name === 'TrackStartError') {
+        msg += ': камера занята другим приложением (Zoom/Teams и т.п.)';
+      } else {
+        msg += ' (' + (err && err.message ? err.message : 'ошибка') + ')';
+      }
       setCam('err', 'камера: нет доступа');
-      showError('Доступ к камере не получен (' + (err && err.message ? err.message : 'ошибка') + '). Разрешите доступ к веб-камере в браузере и обновите страницу — если это встроенный просмотр, откройте страницу в отдельной вкладке.');
+      showError(msg + '. Если это встроенный просмотр — откройте страницу в отдельной вкладке.');
     });
   }
 
@@ -432,18 +533,27 @@
     mouseDot.style.top = e.clientY + 'px';
     mouseDot.classList.add('live');
     if (recording && e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
-      mousePoints.push({ x: e.clientX, y: e.clientY, t: performance.now() - recordStart });
+      var t = performance.now() - recordStart;
+      mousePoints.push({ x: Math.round(e.clientX), y: Math.round(e.clientY), t: Math.round(t) });
+      if (mousePoints.length > MAX_POINTS) mousePoints.shift();
     }
   });
 
   /* ---------------- recording ---------------- */
   btnStart.addEventListener('click', function () {
+    if (typeof webgazer !== 'undefined' && !calibrated) {
+      showError('Сначала пройдите калибровку — без неё точки взгляда будут случайными.');
+      calibOverlay.classList.add('show');
+      return;
+    }
     recording = true;
     gazePoints = []; mousePoints = [];
     recordStart = performance.now();
+    lastGazeT = -Infinity;
     viewMode = 'live';
+    hideError();
     btnStart.disabled = true; btnStop.disabled = false;
-    btnHeat.disabled = true; btnPath.disabled = true; btnReset.disabled = true;
+    btnHeat.disabled = true; btnPath.disabled = true; btnReset.disabled = true; btnExport.disabled = true;
     rMode.textContent = 'запись…';
     ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
     timerHandle = setInterval(function () {
@@ -456,20 +566,48 @@
     recording = false;
     clearInterval(timerHandle);
     btnStart.disabled = false; btnStop.disabled = true;
-    btnHeat.disabled = gazePoints.length === 0;
-    btnPath.disabled = gazePoints.length === 0;
-    btnReset.disabled = gazePoints.length === 0;
+    var hasData = gazePoints.length > 0;
+    btnHeat.disabled = !hasData;
+    btnPath.disabled = !hasData;
+    btnReset.disabled = !hasData;
+    btnExport.disabled = !hasData;
     rMode.textContent = 'остановлено';
     computeDelta();
-    if (gazePoints.length > 0) { viewMode = 'heat'; setActiveViewButton(); redraw(); }
+    if (hasData) { viewMode = 'heat'; setActiveViewButton(); redraw(); }
+    else showError('Запись завершена, но точек взгляда нет. Проверьте освещение и положение лица в кадре, повторите калибровку.');
   });
 
   btnReset.addEventListener('click', function () {
     gazePoints = []; mousePoints = [];
     ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
     rGaze.textContent = '0'; rTime.textContent = '0.0s'; rDelta.textContent = '—'; rMode.textContent = 'ожидание';
-    btnHeat.disabled = true; btnPath.disabled = true; btnReset.disabled = true;
+    btnHeat.disabled = true; btnPath.disabled = true; btnReset.disabled = true; btnExport.disabled = true;
     viewMode = 'live'; setActiveViewButton();
+  });
+
+  /* ---------------- export ---------------- */
+  btnExport.addEventListener('click', function () {
+    sessionSeq++;
+    var payload = {
+      version: 1,
+      tool: 'gaze-lab-prototype',
+      sessionId: Date.now() + '-' + sessionSeq,
+      exportedAt: new Date().toISOString(),
+      screen: { width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio || 1 },
+      calibrated: calibrated,
+      durationMs: gazePoints.length ? gazePoints[gazePoints.length - 1].t : 0,
+      gazePoints: gazePoints,
+      mousePoints: mousePoints
+    };
+    var blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'gaze-session-' + payload.sessionId + '.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
   });
 
   btnHeat.addEventListener('click', function () { viewMode = (viewMode === 'heat') ? 'live' : 'heat'; setActiveViewButton(); redraw(); });
@@ -482,36 +620,38 @@
 
   function computeDelta() {
     if (gazePoints.length === 0 || mousePoints.length === 0) { rDelta.textContent = '—'; return; }
-    var total = 0, n = 0;
-    gazePoints.forEach(function (g) {
-      // nearest mouse sample in time
-      var best = null, bestDt = Infinity;
-      for (var i = 0; i < mousePoints.length; i++) {
-        var dt = Math.abs(mousePoints[i].t - g.t);
-        if (dt < bestDt) { bestDt = dt; best = mousePoints[i]; }
-      }
-      if (best && bestDt < 400) {
-        total += Math.hypot(g.x - best.x, g.y - best.y);
+    // O(n+m): оба массива отсортированы по времени — идём двумя указателями
+    var total = 0, n = 0, j = 0;
+    for (var i = 0; i < gazePoints.length; i++) {
+      var g = gazePoints[i];
+      while (j + 1 < mousePoints.length && Math.abs(mousePoints[j + 1].t - g.t) <= Math.abs(mousePoints[j].t - g.t)) j++;
+      var bestDt = Math.abs(mousePoints[j].t - g.t);
+      if (bestDt < 400) {
+        total += Math.hypot(g.x - mousePoints[j].x, g.y - mousePoints[j].y);
         n++;
       }
-    });
+    }
     rDelta.textContent = n > 0 ? Math.round(total / n) + 'px' : '—';
   }
 
   /* ---------------- drawing ---------------- */
   function redraw() {
     var r = stage.getBoundingClientRect();
-    ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    ctx.clearRect(0, 0, r.width, r.height);
     if (viewMode === 'heat') drawHeatmap(r);
     else if (viewMode === 'path') drawScanpath(r);
   }
 
   function drawHeatmap(stageRect) {
-    var w = overlayCanvas.width, h = overlayCanvas.height;
+    var w = stageRect.width, h = stageRect.height;
+    // рисуем тепловую карту в пониженном разрешении и растягиваем — быстрее на больших экранах
+    var scale = Math.min(1, 900 / Math.max(w, h));
+    var cw = Math.max(1, Math.round(w * scale)), ch = Math.max(1, Math.round(h * scale));
     var off = document.createElement('canvas');
-    off.width = w; off.height = h;
+    off.width = cw; off.height = ch;
     var octx = off.getContext('2d');
     octx.globalCompositeOperation = 'lighter';
+    octx.scale(scale, scale);
     var radius = Math.max(28, Math.min(w, h) * 0.06);
     gazePoints.forEach(function (p) {
       var x = p.x - stageRect.left, y = p.y - stageRect.top;
@@ -522,7 +662,7 @@
       octx.fillStyle = grad;
       octx.beginPath(); octx.arc(x, y, radius, 0, Math.PI * 2); octx.fill();
     });
-    var img = octx.getImageData(0, 0, w, h);
+    var img = octx.getImageData(0, 0, cw, ch);
     var data = img.data;
     var stops = heatGradient();
     for (var i = 0; i < data.length; i += 4) {
@@ -533,7 +673,8 @@
       data[i + 3] = Math.min(255, a + 70);
     }
     octx.putImageData(img, 0, 0);
-    ctx.drawImage(off, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(off, 0, 0, cw, ch, 0, 0, w, h);
   }
 
   var _stopsCache = null;
@@ -559,23 +700,37 @@
   function drawScanpath(stageRect) {
     var pts = gazePoints.map(function (p) { return { x: p.x - stageRect.left, y: p.y - stageRect.top }; });
     if (pts.length < 2) return;
+    // I-VT-подобное упрощение: соединяем только точки в пределах окна саккады,
+    // иначе получаем «паутину» из линий через весь экран на 60fps-потоке точек
+    var LINK_WINDOW_MS = 150;
     ctx.strokeStyle = 'rgba(255,171,51,0.55)';
     ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(pts[0].x, pts[0].y);
-    for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
-    ctx.stroke();
-    pts.forEach(function (p, i) {
+    for (var i = 1; i < pts.length; i++) {
+      if (gazePoints[i].t - gazePoints[i - 1].t > LINK_WINDOW_MS) continue;
       ctx.beginPath();
-      ctx.fillStyle = i === 0 ? '#63d08a' : (i === pts.length - 1 ? '#e8654a' : 'rgba(255,171,51,0.75)');
-      ctx.arc(p.x, p.y, i === 0 || i === pts.length - 1 ? 5 : 2.6, 0, Math.PI * 2);
+      ctx.moveTo(pts[i - 1].x, pts[i - 1].y);
+      ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.stroke();
+    }
+    // рисуем не более ~400 маркеров, равномерно прореживая длинные сессии
+    var step = Math.max(1, Math.ceil(pts.length / 400));
+    for (var k = 0; k < pts.length; k += step) {
+      var last = k + step >= pts.length;
+      ctx.beginPath();
+      ctx.fillStyle = k === 0 ? '#63d08a' : (last ? '#e8654a' : 'rgba(255,171,51,0.75)');
+      ctx.arc(pts[k].x, pts[k].y, (k === 0 || last) ? 5 : 2.6, 0, Math.PI * 2);
       ctx.fill();
-    });
+    }
   }
 
   window.addEventListener('load', function () {
     resizeCanvas();
     initWebgazer();
+  });
+
+  // Останавливаем трекинг при уходе со страницы — приватность и ресурсы
+  window.addEventListener('pagehide', function () {
+    try { webgazer.pause(); webgazer.reset(); } catch (e) {}
   });
 })();
 </script>
